@@ -1,4 +1,4 @@
-"""检测任务接口：维护检测任务，覆盖分配任务、开始检测、提交结果等动作。"""
+"""检测任务接口：维护检测任务，覆盖分配任务、开始检测、提交结果、挂起、恢复检测、更换执行人员、复核退回等动作。"""
 from __future__ import annotations
 
 from typing import Any
@@ -13,13 +13,13 @@ router = APIRouter(prefix="/api/task", tags=["检测任务"])
 service = TaskService()
 
 LIST_FIELDS = ["任务编号", "关联样品", "检测项目", "检测方法", "标准编号", "执行人员", "计划完成日", "任务状态"]
-STATUSES = ["待分配", "待检测", "检测中", "已完成"]
+STATUSES = ["待分配", "待检测", "检测中", "已挂起", "已完成"]
 
 
 @router.get("", response_model=PageResult[dict])
 def list_entries(
     keyword: str | None = Query(default=None, description="按任务编号检索"),
-    status: str | None = Query(default=None, description="待分配、待检测、检测中、已完成"),
+    status: str | None = Query(default=None, description="待分配、待检测、检测中、已挂起、已完成"),
     page: int = 1,
     size: int = 20,
 ) -> PageResult[dict]:
@@ -32,7 +32,7 @@ def list_entries(
 
 @router.get("/{entry_id}", response_model=dict)
 def get_entry(entry_id: int) -> dict:
-    """读取单条检测任务明细；不存在时给出可读的错误说明。"""
+    """读取单条检测任务明细（含流转记录）；不存在时给出可读的错误说明。"""
     entry = service.get_entry(entry_id)
     if entry is None:
         raise HTTPException(status_code=404, detail=f"检测任务 {entry_id} 不存在或已归档")
@@ -41,8 +41,8 @@ def get_entry(entry_id: int) -> dict:
 
 @router.post("", response_model=ActionResult)
 def create_entry(payload: EntryPayload) -> ActionResult:
-    """登记一条检测任务，缺字段时说明原因而不是静默丢弃。"""
-    entry, missing = service.create_entry(payload.values)
+    """登记一条检测任务，初始状态为待分配；缺字段时说明原因而不是静默丢弃。"""
+    entry, missing = service.create_entry(payload.values, remark=payload.remark)
     if missing:
         return ActionResult(ok=False, message=f"缺少必填字段：{'、'.join(missing)}")
     return ActionResult(ok=True, message="检测任务已登记", entry=entry)
@@ -50,9 +50,9 @@ def create_entry(payload: EntryPayload) -> ActionResult:
 
 @router.post("/{entry_id}/actions", response_model=ActionResult)
 def run_action(entry_id: int, payload: EntryPayload) -> ActionResult:
-    """对单条检测任务执行分配任务、开始检测、提交结果；不允许的动作会被拦下并说明原因。"""
+    """对单条检测任务执行状态流转；越级流转、缺执行人员或缺更换/退回原因都会被拦下并说明原因。"""
     action = str(payload.values.get("action") or "").strip()
-    entry, message = service.run_action(entry_id, action)
+    entry, message = service.run_action(entry_id, action, values=payload.values, remark=payload.remark)
     if entry is None:
         return ActionResult(ok=False, message=message)
     return ActionResult(ok=True, message=message, entry=entry)
