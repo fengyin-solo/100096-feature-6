@@ -4,6 +4,7 @@ import Dashboard from '@/views/Dashboard.vue'
 const Sample = () => import('@/views/sample/index.vue')
 const Contract = () => import('@/views/contract/index.vue')
 const Task = () => import('@/views/task/index.vue')
+const TaskDetail = () => import('@/views/task/detail.vue')
 const Method = () => import('@/views/method/index.vue')
 const Instrument = () => import('@/views/instrument/index.vue')
 const Standard = () => import('@/views/standard/index.vue')
@@ -29,6 +30,7 @@ const router = createRouter({
     { path: '/sample', name: 'sample', component: Sample },
     { path: '/contract', name: 'contract', component: Contract },
     { path: '/task', name: 'task', component: Task },
+    { path: '/task/:id', name: 'task-detail', component: TaskDetail },
     { path: '/method', name: 'method', component: Method },
     { path: '/instrument', name: 'instrument', component: Instrument },
     { path: '/standard', name: 'standard', component: Standard },

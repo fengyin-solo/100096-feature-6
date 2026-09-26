@@ -3,7 +3,7 @@
     <header class="page-head">
       <div>
         <h2>检测任务管理</h2>
-        <p class="page-desc">维护检测任务，围绕任务编号、关联样品、检测项目、检测方法做登记、筛选与状态流转。</p>
+        <p class="page-desc">任务编号建立后从待分配依次流转到待检测、检测中，最后完成；检测中可挂起恢复，更换执行人员须先退回待分配并写明原因。</p>
       </div>
       <div class="page-actions">
         <button class="btn primary" type="button" @click="openCreate">登记检测任务</button>
@@ -19,9 +19,16 @@
     </div>
 
     <form class="filter-bar" @submit.prevent="reload">
-      <label v-for="field in filterFields" :key="field" class="filter-item">
-        <span>{{ field }}</span>
-        <input v-model="filters[field]" :placeholder="`按${field}检索`" />
+      <label class="filter-item">
+        <span>任务编号</span>
+        <input v-model="keyword" placeholder="按任务编号检索" />
+      </label>
+      <label class="filter-item">
+        <span>任务状态</span>
+        <select v-model="statusFilter">
+          <option value="">全部状态</option>
+          <option v-for="status in STATUSES" :key="status" :value="status">{{ status }}</option>
+        </select>
       </label>
       <button class="btn" type="submit">查询</button>
       <button class="btn ghost" type="button" @click="resetFilters">重置条件</button>
@@ -36,14 +43,17 @@
       </thead>
       <tbody>
         <tr v-for="row in rows" :key="String(row.id)">
-          <td v-for="column in columns" :key="column">{{ row[column] ?? '—' }}</td>
+          <td v-for="column in columns" :key="column">
+            <RouterLink v-if="column === '任务编号'" :to="`/task/${row.id}`">{{ row[column] ?? '—' }}</RouterLink>
+            <template v-else>{{ row[column] ?? '—' }}</template>
+          </td>
           <td class="row-actions">
             <button
-              v-for="action in actions"
+              v-for="action in actionsFor(row.status)"
               :key="action"
               class="link"
               type="button"
-              @click="runAction(action, row)"
+              @click="openAction(action, row)"
             >
               {{ action }}
             </button>
@@ -59,30 +69,79 @@
       <span>共 {{ total }} 条检测任务记录</span>
       <span v-if="errorMessage" class="error-text">{{ errorMessage }}</span>
     </footer>
+
+    <ActionDialog
+      v-if="activeAction && activeRow"
+      :action="activeAction"
+      :task-label="String(activeRow.任务编号 ?? activeRow.id)"
+      @cancel="closeAction"
+      @submit="submitAction"
+    />
+
+    <div v-if="createVisible" class="dialog-mask" @click.self="createVisible = false">
+      <div class="dialog-card">
+        <h3 class="dialog-title">登记检测任务</h3>
+        <p class="dialog-desc">登记后任务进入待分配，再依次流转。</p>
+        <label v-for="field in createFields" :key="field.key" class="dialog-field">
+          <span>
+            {{ field.label }}
+            <em v-if="field.required" class="required-mark">*</em>
+          </span>
+          <input v-model="createForm[field.key]" :placeholder="`请填写${field.label}`" />
+        </label>
+        <p v-if="createError" class="error-text">{{ createError }}</p>
+        <div class="dialog-actions">
+          <button class="btn primary" type="button" @click="submitCreate">确认登记</button>
+          <button class="btn ghost" type="button" @click="createVisible = false">取消</button>
+        </div>
+      </div>
+    </div>
   </section>
 </template>
 
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 
 import { request } from '@/api/client'
+import { useSessionStore } from '@/stores/session'
+
+import ActionDialog from './ActionDialog.vue'
+import { STATUSES, actionsFor } from './taskFlow'
 
 type Row = Record<string, string | number | null>
 
 const ENDPOINT = '/api/task'
 const columns = ["任务编号", "关联样品", "检测项目", "检测方法", "标准编号", "执行人员", "计划完成日", "任务状态"]
-const actions = ["分配任务", "开始检测", "提交结果"]
-const statuses = ["待分配", "待检测", "检测中", "已完成"]
-const stats = [{"label": "待分配任务", "value": 0}, {"label": "检测中任务", "value": 0}, {"label": "已完成任务", "value": 0}]
+const createFields = [
+  { key: '任务编号', label: '任务编号', required: true },
+  { key: '关联样品', label: '关联样品', required: true },
+  { key: '检测项目', label: '检测项目', required: true },
+  { key: '检测方法', label: '检测方法', required: false },
+  { key: '标准编号', label: '标准编号', required: false },
+  { key: '计划完成日', label: '计划完成日', required: false },
+]
+
+const session = useSessionStore()
 
 const rows = ref<Row[]>([])
 const total = ref(0)
 const errorMessage = ref('')
-const filters = ref<Record<string, string>>({})
-const filterFields = columns.slice(0, 3)
+const keyword = ref('')
+const statusFilter = ref('')
+
+const statusCounts = ref<Record<string, number>>({})
+const stats = computed(() => STATUSES.map((status) => ({ label: `${status}任务`, value: statusCounts.value[status] ?? 0 })))
+
+const activeAction = ref('')
+const activeRow = ref<Row | null>(null)
+
+const createVisible = ref(false)
+const createForm = ref<Record<string, string>>({})
+const createError = ref('')
 
 function resetFilters() {
-  filters.value = {}
+  keyword.value = ''
+  statusFilter.value = ''
   void reload()
 }
 
@@ -91,30 +150,75 @@ function exportRows() {
 }
 
 function openCreate() {
-  errorMessage.value = '检测任务登记入口尚未接入审批流'
+  createForm.value = {}
+  createError.value = ''
+  createVisible.value = true
 }
 
-async function runAction(action: string, row: Row) {
+function openAction(action: string, row: Row) {
+  activeAction.value = action
+  activeRow.value = row
+}
+
+function closeAction() {
+  activeAction.value = ''
+  activeRow.value = null
+}
+
+async function submitAction(payload: { values: Record<string, string>; remark: string }) {
+  if (!activeRow.value) return
   errorMessage.value = ''
   try {
-    const response = await request(`${ENDPOINT}/${row.id}/actions`, {
+    const response = await request(`${ENDPOINT}/${activeRow.value.id}/actions`, {
       method: 'POST',
-      body: JSON.stringify({ action }),
+      body: JSON.stringify({
+        values: { action: activeAction.value, 操作人: session.operator, ...payload.values },
+        remark: payload.remark,
+      }),
     })
-    if (!response.ok) {
-      throw new Error('检测任务动作未生效，请稍后重试')
+    const result = await response.json()
+    if (!response.ok || !result.ok) {
+      throw new Error(result.message ?? result.detail ?? '检测任务动作未生效，请稍后重试')
     }
-    await reload()
+    closeAction()
+    await Promise.all([reload(), loadStats()])
   } catch (error) {
+    closeAction()
     errorMessage.value = error instanceof Error ? error.message : '检测任务操作失败'
+  }
+}
+
+async function submitCreate() {
+  createError.value = ''
+  for (const field of createFields) {
+    if (field.required && !(createForm.value[field.key] ?? '').trim()) {
+      createError.value = `请先填写${field.label}`
+      return
+    }
+  }
+  try {
+    const response = await request(ENDPOINT, {
+      method: 'POST',
+      body: JSON.stringify({ values: { 操作人: session.operator, ...createForm.value } }),
+    })
+    const result = await response.json()
+    if (!response.ok || !result.ok) {
+      throw new Error(result.message ?? result.detail ?? '检测任务登记失败')
+    }
+    createVisible.value = false
+    await Promise.all([reload(), loadStats()])
+  } catch (error) {
+    createError.value = error instanceof Error ? error.message : '检测任务登记失败'
   }
 }
 
 async function reload() {
   errorMessage.value = ''
-  const query = new URLSearchParams(filters.value as Record<string, string>).toString()
+  const query = new URLSearchParams()
+  if (keyword.value.trim()) query.set('keyword', keyword.value.trim())
+  if (statusFilter.value) query.set('status', statusFilter.value)
   try {
-    const response = await request(`${ENDPOINT}?${query}`)
+    const response = await request(`${ENDPOINT}?${query.toString()}`)
     if (!response.ok) {
       throw new Error('检测任务列表读取失败')
     }
@@ -126,5 +230,24 @@ async function reload() {
   }
 }
 
-onMounted(reload)
+async function loadStats() {
+  try {
+    const response = await request(`${ENDPOINT}?size=200`)
+    if (!response.ok) return
+    const payload = await response.json()
+    const counts: Record<string, number> = {}
+    for (const item of payload.items ?? []) {
+      const status = String(item.status ?? '')
+      counts[status] = (counts[status] ?? 0) + 1
+    }
+    statusCounts.value = counts
+  } catch {
+    // 统计卡片加载失败不阻塞列表本身
+  }
+}
+
+onMounted(() => {
+  void reload()
+  void loadStats()
+})
 </script>
